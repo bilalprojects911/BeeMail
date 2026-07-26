@@ -4,7 +4,7 @@ const SUPABASE_URL = "https://ytgztkehiussvkvhhakp.supabase.co";
 const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Inl0Z3p0a2VoaXVzc3ZrdmhoYWtwIiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODUwMDc5MTcsImV4cCI6MjEwMDU4MzkxN30.Uy-0xXCa72ZSxf8VKtlTthNebyxQellw2d4rVnJeboU";
 
 // Create Supabase client only if credentials are provided to prevent errors
-const supabase = (SUPABASE_URL.includes('YOUR_')) ? null : window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+window.supabaseClient = (SUPABASE_URL.includes('YOUR_')) ? null : window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
 // State
 let emails = [];
@@ -57,7 +57,7 @@ async function init() {
         document.documentElement.classList.remove('dark');
     }
 
-    if (!supabase) {
+    if (!window.supabaseClient) {
         // Fallback to local storage if Supabase isn't configured yet
         showToast("Supabase keys missing. Running in local mode.", "info");
         loadLocalEmails();
@@ -74,7 +74,7 @@ async function init() {
 // Database Fetching & Seeding
 async function fetchEmailsFromSupabase() {
     try {
-        const { data, error } = await supabase.from('emails').select('*').order('id', { ascending: false });
+        const { data, error } = await window.supabaseClient.from('emails').select('*').order('id', { ascending: false });
         if (error) throw error;
         
         if (data.length === 0 && mockEmails) {
@@ -98,10 +98,10 @@ async function fetchEmailsFromSupabase() {
                 replies: []
             }));
 
-            const { error: insertError } = await supabase.from('emails').insert(seedData);
+            const { error: insertError } = await window.supabaseClient.from('emails').insert(seedData);
             if (insertError) throw insertError;
             
-            const { data: newData } = await supabase.from('emails').select('*').order('id', { ascending: false });
+            const { data: newData } = await window.supabaseClient.from('emails').select('*').order('id', { ascending: false });
             emails = newData || [];
         } else {
             emails = data;
@@ -123,9 +123,13 @@ function loadLocalEmails() {
     }
 }
 
+function saveEmails() {
+    localStorage.setItem('beemail_data', JSON.stringify(emails));
+}
+
 // Realtime Listener
 function setupRealtimeSubscription() {
-    supabase.channel('custom-all-channel')
+    window.supabaseClient.channel('custom-all-channel')
     .on('postgres_changes', { event: '*', schema: 'public', table: 'emails' }, payload => {
         
         if (payload.eventType === 'INSERT') {
@@ -155,9 +159,9 @@ function setupRealtimeSubscription() {
 
 // DB Updates
 async function updateEmailInDB(id, updates) {
-    if (supabase) {
+    if (window.supabaseClient) {
         try {
-            await supabase.from('emails').update(updates).eq('id', id);
+            await window.supabaseClient.from('emails').update(updates).eq('id', id);
         } catch(err) {
             console.error("Update failed", err);
         }
@@ -582,11 +586,11 @@ async function handleSendEmail() {
     sendEmailBtn.innerHTML = `<i class="ph ph-spinner animate-spin text-lg"></i> Sending...`;
 
     try {
-        if (supabase) {
+        if (window.supabaseClient) {
             // Remove the temporary ID, let the DB generate it
             const dbEmail = { ...newEmail };
             delete dbEmail.id;
-            const { error } = await supabase.from('emails').insert([dbEmail]);
+            const { error } = await window.supabaseClient.from('emails').insert([dbEmail]);
             if (error) throw error;
         } else {
             emails.unshift(newEmail);
