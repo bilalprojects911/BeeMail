@@ -13,6 +13,7 @@ let searchQuery = '';
 let selectedEmailId = null;
 let isMobileDetailView = false;
 let isDarkMode = false;
+let currentUser = null; // Holds the authenticated Supabase user object
 
 // Categories Definition
 const categories = [
@@ -57,18 +58,337 @@ async function init() {
         document.documentElement.classList.remove('dark');
     }
 
-    if (!window.supabaseClient) {
-        // Fallback to local storage if Supabase isn't configured yet
-        showToast("Supabase keys missing. Running in local mode.", "info");
-        loadLocalEmails();
-    } else {
+    // AUTH GUARD: Check session before loading inbox
+    if (window.supabaseClient) {
+        const authenticated = await checkAuthSession();
+        if (!authenticated) {
+            // Show auth modal, don't load inbox yet
+            showAuthModal();
+            setupEventListeners();
+            setupAuthListeners();
+            return;
+        }
         await fetchEmailsFromSupabase();
         setupRealtimeSubscription();
+    } else {
+        // Fallback to local storage if Supabase isn't configured
+        showToast("Supabase keys missing. Running in local mode.", "info");
+        loadLocalEmails();
     }
     
     renderSidebar();
     renderEmailList();
     setupEventListeners();
+    setupAuthListeners();
+}
+
+// ============ AUTHENTICATION ============
+
+async function checkAuthSession() {
+    try {
+        const { data: { session }, error } = await window.supabaseClient.auth.getSession();
+        if (error) throw error;
+        if (session?.user) {
+            currentUser = session.user;
+            updateProfileUI();
+            hideAuthModal();
+            return true;
+        }
+        return false;
+    } catch (err) {
+        console.error('Auth session check failed:', err);
+        return false;
+    }
+}
+
+function showAuthModal() {
+    const authModal = document.getElementById('authModal');
+    authModal.classList.remove('hidden');
+}
+
+function hideAuthModal() {
+    const authModal = document.getElementById('authModal');
+    authModal.classList.add('hidden');
+}
+
+async function signInWithGoogle() {
+    if (!window.supabaseClient) return;
+    try {
+        const { error } = await window.supabaseClient.auth.signInWithOAuth({
+            provider: 'google',
+            options: {
+                redirectTo: window.location.href
+            }
+        });
+        if (error) throw error;
+    } catch (err) {
+        console.error('Google sign-in error:', err);
+        showAuthError(err.message || 'Failed to sign in with Google');
+    }
+}
+
+async function signInWithEmail() {
+    if (!window.supabaseClient) return;
+    const email = document.getElementById('authEmail').value.trim();
+    const password = document.getElementById('authPassword').value;
+    
+    if (!email || !password) {
+        showAuthError('Please enter both email and password.');
+        return;
+    }
+    
+    try {
+        const { data, error } = await window.supabaseClient.auth.signInWithPassword({ email, password });
+        if (error) throw error;
+        currentUser = data.user;
+        updateProfileUI();
+        hideAuthModal();
+        await loadInboxAfterAuth();
+        showToast('Signed in successfully', 'success');
+    } catch (err) {
+        console.error('Email sign-in error:', err);
+        showAuthError(err.message || 'Invalid credentials.');
+    }
+}
+
+async function signUpWithEmail() {
+    if (!window.supabaseClient) return;
+    const email = document.getElementById('authEmail').value.trim();
+    const password = document.getElementById('authPassword').value;
+    
+    if (!email || !password) {
+        showAuthError('Please enter both email and password.');
+        return;
+    }
+    if (password.length < 6) {
+        showAuthError('Password must be at least 6 characters.');
+        return;
+    }
+    
+    try {
+        const { data, error } = await window.supabaseClient.auth.signUp({ email, password });
+        if (error) throw error;
+        if (data.user && !data.user.confirmed_at && data.user.identities?.length === 0) {
+            showAuthError('This email is already registered. Please sign in instead.');
+            return;
+        }
+        if (data.session) {
+            currentUser = data.user;
+            updateProfileUI();
+            hideAuthModal();
+            await loadInboxAfterAuth();
+            showToast('Account created! Welcome to BeeMail.', 'success');
+        } else {
+            showAuthError('Check your email for a confirmation link, then sign in.');
+        }
+    } catch (err) {
+        console.error('Sign-up error:', err);
+        showAuthError(err.message || 'Sign up failed.');
+    }
+}
+
+async function handleSignOut() {
+    if (!window.supabaseClient) return;
+    try {
+        await window.supabaseClient.auth.signOut();
+    } catch (err) {
+        console.error('Sign out error:', err);
+    }
+    // Clear app state
+    currentUser = null;
+    emails = [];
+    selectedEmailId = null;
+    currentCategory = 'inbox';
+    searchQuery = '';
+    
+    // Reset UI
+    renderSidebar();
+    renderEmailList();
+    renderEmailDetail();
+    closeProfileDropdown();
+    showAuthModal();
+    showToast('Signed out', 'info');
+}
+
+async function loadInboxAfterAuth() {
+    await fetchEmailsFromSupabase();
+    setupRealtimeSubscription();
+    renderSidebar();
+    renderEmailList();
+}
+
+function showAuthError(message) {
+    const errEl = document.getElementById('authError');
+    errEl.textContent = message;
+    errEl.classList.remove('hidden');
+    setTimeout(() => errEl.classList.add('hidden'), 5000);
+}
+
+function updateProfileUI() {
+    if (!currentUser) return;
+    const meta = currentUser.user_metadata || {};
+    const displayName = meta.full_name || meta.name || meta.preferred_username || currentUser.email?.split('@')[0] || 'User';
+    const email = currentUser.email || 'user@beemail.io';
+    const avatarUrl = meta.avatar_url || meta.picture || `https://ui-avatars.com/api/?name=${encodeURIComponent(displayName)}&background=0b5cff&color=fff&bold=true`;
+    
+    // Header avatar
+    const headerAvatar = document.getElementById('headerAvatar');
+    if (headerAvatar) headerAvatar.src = avatarUrl;
+    
+    // Dropdown
+    const dropdownAvatar = document.getElementById('dropdownAvatar');
+    const dropdownName = document.getElementById('dropdownName');
+    const dropdownEmail = document.getElementById('dropdownEmail');
+    if (dropdownAvatar) dropdownAvatar.src = avatarUrl;
+    if (dropdownName) dropdownName.textContent = displayName;
+    if (dropdownEmail) dropdownEmail.textContent = email;
+    
+    // Settings modal
+    const settingsAvatar = document.getElementById('settingsAvatar');
+    const settingsEmail = document.getElementById('settingsEmail');
+    const settingsDisplayName = document.getElementById('settingsDisplayName');
+    if (settingsAvatar) settingsAvatar.src = avatarUrl;
+    if (settingsEmail) settingsEmail.textContent = email;
+    if (settingsDisplayName) settingsDisplayName.value = displayName;
+}
+
+// ============ PROFILE DROPDOWN ============
+
+function toggleProfileDropdown() {
+    const dropdown = document.getElementById('profileDropdown');
+    if (dropdown.classList.contains('hidden')) {
+        openProfileDropdown();
+    } else {
+        closeProfileDropdown();
+    }
+}
+
+function openProfileDropdown() {
+    const dropdown = document.getElementById('profileDropdown');
+    dropdown.classList.remove('hidden');
+    setTimeout(() => {
+        dropdown.classList.remove('opacity-0', 'scale-95');
+        dropdown.classList.add('opacity-100', 'scale-100');
+    }, 10);
+}
+
+function closeProfileDropdown() {
+    const dropdown = document.getElementById('profileDropdown');
+    dropdown.classList.remove('opacity-100', 'scale-100');
+    dropdown.classList.add('opacity-0', 'scale-95');
+    setTimeout(() => dropdown.classList.add('hidden'), 200);
+}
+
+// ============ PROFILE SETTINGS MODAL ============
+
+function openProfileSettingsModal() {
+    closeProfileDropdown();
+    updateProfileUI(); // Refresh data
+    const modal = document.getElementById('profileSettingsModal');
+    const content = document.getElementById('profileSettingsContent');
+    modal.classList.remove('hidden');
+    setTimeout(() => {
+        modal.classList.remove('opacity-0');
+        content.classList.remove('scale-95');
+        content.classList.add('scale-100');
+    }, 10);
+}
+
+function closeProfileSettingsModal() {
+    const modal = document.getElementById('profileSettingsModal');
+    const content = document.getElementById('profileSettingsContent');
+    modal.classList.add('opacity-0');
+    content.classList.remove('scale-100');
+    content.classList.add('scale-95');
+    setTimeout(() => modal.classList.add('hidden'), 300);
+}
+
+async function saveProfile() {
+    if (!window.supabaseClient || !currentUser) return;
+    const newName = document.getElementById('settingsDisplayName').value.trim();
+    if (!newName) {
+        showToast('Display name cannot be empty', 'info');
+        return;
+    }
+    
+    try {
+        const { data, error } = await window.supabaseClient.auth.updateUser({
+            data: { full_name: newName }
+        });
+        if (error) throw error;
+        currentUser = data.user;
+        updateProfileUI();
+        closeProfileSettingsModal();
+        showToast('Profile updated', 'success');
+    } catch (err) {
+        console.error('Profile update error:', err);
+        showToast('Failed to update profile', 'info');
+    }
+}
+
+// ============ AUTH EVENT LISTENERS ============
+
+function setupAuthListeners() {
+    // Google OAuth button
+    document.getElementById('googleSignInBtn')?.addEventListener('click', signInWithGoogle);
+    
+    // Email/Password
+    document.getElementById('emailSignInBtn')?.addEventListener('click', signInWithEmail);
+    document.getElementById('emailSignUpBtn')?.addEventListener('click', signUpWithEmail);
+    
+    // Enter key on password field triggers sign in
+    document.getElementById('authPassword')?.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter') signInWithEmail();
+    });
+    
+    // Profile avatar dropdown toggle
+    document.getElementById('profileAvatarBtn')?.addEventListener('click', (e) => {
+        e.stopPropagation();
+        toggleProfileDropdown();
+    });
+    
+    // Close dropdown on outside click
+    document.addEventListener('click', (e) => {
+        const wrapper = document.getElementById('profileAvatarWrapper');
+        if (wrapper && !wrapper.contains(e.target)) {
+            closeProfileDropdown();
+        }
+    });
+    
+    // Sign Out
+    document.getElementById('signOutBtn')?.addEventListener('click', handleSignOut);
+    
+    // Profile Settings
+    document.getElementById('profileSettingsBtn')?.addEventListener('click', openProfileSettingsModal);
+    document.getElementById('closeProfileSettingsBtn')?.addEventListener('click', closeProfileSettingsModal);
+    document.getElementById('saveProfileBtn')?.addEventListener('click', saveProfile);
+    
+    // Close profile settings on overlay click
+    document.getElementById('profileSettingsModal')?.addEventListener('click', (e) => {
+        if (e.target.id === 'profileSettingsModal') closeProfileSettingsModal();
+    });
+    
+    // Listen for Supabase auth state changes (handles OAuth redirect callback)
+    if (window.supabaseClient) {
+        window.supabaseClient.auth.onAuthStateChange(async (event, session) => {
+            if (event === 'SIGNED_IN' && session?.user) {
+                currentUser = session.user;
+                updateProfileUI();
+                hideAuthModal();
+                // Only load inbox if emails haven't been loaded yet
+                if (emails.length === 0) {
+                    await loadInboxAfterAuth();
+                }
+            } else if (event === 'SIGNED_OUT') {
+                currentUser = null;
+                emails = [];
+                renderSidebar();
+                renderEmailList();
+                renderEmailDetail();
+                showAuthModal();
+            }
+        });
+    }
 }
 
 // Database Fetching & Seeding
@@ -423,7 +743,7 @@ function renderEmailDetail() {
                 <!-- Reply Box -->
                 <div class="mt-10 pt-6 border-t border-slate-200 dark:border-dark-700">
                     <div class="border border-slate-200 dark:border-dark-700 rounded-xl p-3 flex gap-3 focus-within:ring-2 ring-brand-500/50 transition-shadow bg-white dark:bg-dark-800">
-                        <img src="https://i.pravatar.cc/150?u=me" class="w-10 h-10 rounded-full object-cover shadow-sm">
+                        <img src="${getUserAvatar()}" class="w-10 h-10 rounded-full object-cover shadow-sm">
                         <input type="text" id="replyInput" placeholder="Reply to ${email.sender}..." class="flex-1 bg-transparent outline-none text-slate-900 dark:text-white font-medium placeholder-slate-400" autocomplete="off">
                         <button id="sendReplyBtn" class="bg-brand-500 hover:bg-brand-600 text-white w-10 h-10 rounded-lg flex items-center justify-center transition-colors shadow-sm disabled:opacity-50">
                             <i class="ph ph-paper-plane-right"></i>
@@ -486,8 +806,8 @@ function renderEmailDetail() {
         
         const newReply = {
             id: Date.now(),
-            sender: "Me",
-            avatar: "https://i.pravatar.cc/150?u=me",
+            sender: getUserDisplayName(),
+            avatar: getUserAvatar(),
             body: text,
             timestamp: "Just now"
         };
@@ -568,8 +888,8 @@ async function handleSendEmail() {
     // but we add it for local state rendering until it syncs.
     const newEmail = {
         id: Date.now(), 
-        sender: "Me",
-        senderEmail: "bilal@beemail.io",
+        sender: getUserDisplayName(),
+        senderEmail: getUserEmail(),
         subject: subject || "(No Subject)",
         snippet: body.length > 50 ? body.substring(0, 50) + "..." : body,
         body: body,
@@ -577,9 +897,10 @@ async function handleSendEmail() {
         category: "sent",
         read: true,
         starred: false,
-        avatar: "https://i.pravatar.cc/150?u=me",
+        avatar: getUserAvatar(),
         is_trashed: false,
-        replies: []
+        replies: [],
+        user_id: currentUser?.id || null
     };
 
     const originalText = sendEmailBtn.innerHTML;
@@ -692,6 +1013,24 @@ function checkResponsive() {
             emailListCol.classList.add('-translate-x-full');
         }
     }
+}
+
+// ============ USER HELPERS ============
+
+function getUserDisplayName() {
+    if (!currentUser) return 'Me';
+    const meta = currentUser.user_metadata || {};
+    return meta.full_name || meta.name || currentUser.email?.split('@')[0] || 'Me';
+}
+
+function getUserEmail() {
+    return currentUser?.email || 'user@beemail.io';
+}
+
+function getUserAvatar() {
+    if (!currentUser) return 'https://i.pravatar.cc/150?u=me';
+    const meta = currentUser.user_metadata || {};
+    return meta.avatar_url || meta.picture || `https://ui-avatars.com/api/?name=${encodeURIComponent(getUserDisplayName())}&background=0b5cff&color=fff&bold=true`;
 }
 
 document.addEventListener('DOMContentLoaded', init);
